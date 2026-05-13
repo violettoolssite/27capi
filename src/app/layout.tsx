@@ -11,9 +11,11 @@ export async function generateMetadata(): Promise<Metadata> {
     },
     description: config.siteDescription,
     keywords: config.siteKeyword,
-    icons: config.faviconUrl
-      ? { icon: config.faviconUrl, shortcut: config.faviconUrl, apple: config.faviconUrl }
-      : undefined,
+    icons: {
+      icon: config.faviconUrl ?? '/favicon.svg',
+      shortcut: config.faviconUrl ?? '/favicon.svg',
+      apple: config.faviconUrl ?? '/favicon.svg',
+    },
     openGraph: {
       title: config.siteName,
       description: config.siteDescription,
