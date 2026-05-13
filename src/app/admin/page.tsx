@@ -105,8 +105,11 @@ export default function AdminPage() {
   const [showAddUpstream, setShowAddUpstream] = useState(false);
 
   const [modelList, setModelList] = useState<string[]>([]);
-  const [modelPrices, setModelPrices] = useState<Record<string, { inputPer1M: number; outputPer1M: number; perRequest: number; enabled: boolean }>>({});
-  const [editingPrice, setEditingPrice] = useState<{ modelId: string; inputPer1M: string; outputPer1M: string; perRequest: string; enabled: boolean } | null>(null);
+  const [modelPrices, setModelPrices] = useState<Record<string, { inputPer1M: number; outputPer1M: number; perRequest: number; enabled: boolean; markup?: number }>>({});
+  const [officialPrices, setOfficialPrices] = useState<Record<string, { input: number; output: number; note?: string }>>({});
+  const [editingPrice, setEditingPrice] = useState<{ modelId: string; markup: string; inputPer1M: string; outputPer1M: string; perRequest: string; enabled: boolean } | null>(null);
+  const [globalMarkup, setGlobalMarkup] = useState('');
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; latency?: number; error?: string; loading?: boolean }>>({});
   const [modelsLoading, setModelsLoading] = useState(false);
 
   function showToast(msg: string, ok = true) {
@@ -280,11 +283,15 @@ export default function AdminPage() {
       const d = await modelsRes.json();
       setModelList(Array.isArray(d?.data) ? d.data.map((m: { id: string }) => m.id).sort() : []);
     }
-    if (pricesRes.ok) setModelPrices(await pricesRes.json());
+    if (pricesRes.ok) {
+      const d = await pricesRes.json();
+      setModelPrices(d.prices ?? {});
+      setOfficialPrices(d.official ?? {});
+    }
     setModelsLoading(false);
   }
 
-  async function saveModelPrice(modelId: string, data: { inputPer1M: number; outputPer1M: number; perRequest: number; enabled: boolean }) {
+  async function saveModelPrice(modelId: string, data: { inputPer1M: number; outputPer1M: number; perRequest: number; enabled: boolean; markup?: number }) {
     const pwd = sessionStorage.getItem('27c_admin_pwd') ?? password;
     const res = await fetch('/api/admin/model-prices', {
       method: 'POST',
@@ -292,10 +299,61 @@ export default function AdminPage() {
       body: JSON.stringify({ modelId, ...data }),
     });
     if (res.ok) {
-      setModelPrices(p => ({ ...p, [modelId]: data }));
+      const official = officialPrices[modelId];
+      const markup = data.markup && data.markup > 0 ? data.markup : undefined;
+      const computed = markup && official
+        ? { inputPer1M: official.input * markup, outputPer1M: official.output * markup }
+        : { inputPer1M: data.inputPer1M, outputPer1M: data.outputPer1M };
+      setModelPrices(p => ({ ...p, [modelId]: { ...data, ...computed } }));
       setEditingPrice(null);
       showToast(`${modelId} 定价已保存`);
     } else showToast('保存失败', false);
+  }
+
+  async function applyGlobalMarkup() {
+    const m = parseFloat(globalMarkup);
+    if (!m || m <= 0) { showToast('请输入有效的折扣倍率', false); return; }
+    const pwd = sessionStorage.getItem('27c_admin_pwd') ?? password;
+    const toSave = modelList.filter(id => officialPrices[id]);
+    let ok = 0;
+    for (const modelId of toSave) {
+      const official = officialPrices[modelId];
+      if (!official) continue;
+      const existing = modelPrices[modelId];
+      await fetch('/api/admin/model-prices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwd}` },
+        body: JSON.stringify({ modelId, markup: m, perRequest: existing?.perRequest ?? 0, enabled: existing?.enabled ?? true }),
+      });
+      ok++;
+    }
+    setModelPrices(prev => {
+      const next = { ...prev };
+      for (const modelId of toSave) {
+        const official = officialPrices[modelId];
+        if (!official) continue;
+        const existing = prev[modelId];
+        next[modelId] = { inputPer1M: official.input * m, outputPer1M: official.output * m, perRequest: existing?.perRequest ?? 0, enabled: existing?.enabled ?? true, markup: m };
+      }
+      return next;
+    });
+    showToast(`已对 ${ok} 个已知官方价格的模型应用 ${m}× 倍率`);
+  }
+
+  async function testModel(modelId: string) {
+    setTestResults(r => ({ ...r, [modelId]: { ok: false, loading: true } }));
+    const pwd = sessionStorage.getItem('27c_admin_pwd') ?? password;
+    try {
+      const res = await fetch('/api/admin/test-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwd}` },
+        body: JSON.stringify({ modelId }),
+      });
+      const d = await res.json();
+      setTestResults(r => ({ ...r, [modelId]: { ok: d.ok, latency: d.latency, error: d.error, loading: false } }));
+    } catch (e) {
+      setTestResults(r => ({ ...r, [modelId]: { ok: false, error: String(e), loading: false } }));
+    }
   }
 
   async function deleteModelPrice(modelId: string) {
@@ -1054,93 +1112,196 @@ export default function AdminPage() {
           )}
 
           {tab === 'pricing' && (
-            <div className="space-y-6 animate-fade-in">
+            <div className="space-y-5">
+              {/* Header */}
               <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold text-clay-900">模型定价</h2>
+                <div>
+                  <h2 className="text-lg font-bold text-clay-900">模型定价</h2>
+                  <p className="text-sm text-clay-500 mt-0.5">从官方原价自动计算，只需填写折扣倍率</p>
+                </div>
                 <button onClick={loadModelPricing} disabled={modelsLoading} className="btn-secondary text-sm">
-                  <RefreshCw size={13} /> {modelsLoading ? '加载中…' : '刷新模型列表'}
+                  <RefreshCw size={13} className={modelsLoading ? 'animate-spin' : ''} /> {modelsLoading ? '加载中…' : '刷新列表'}
                 </button>
               </div>
-              <p className="text-sm text-clay-500">
-                为每个模型设置单独的计费价格（每百万 Token 单价 + 单次请求费用）。未设置的模型使用默认费率。
-              </p>
+
+              {/* Global markup */}
+              <div className="card flex items-center gap-4 py-4">
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-clay-800">全局折扣倍率</p>
+                  <p className="text-xs text-clay-500 mt-0.5">一键设置所有有官方价格的模型（官方价 × 倍率 = 售价）。例：1.0 = 原价, 1.5 = 官方1.5倍, 7.3 = 按汇率转人民币</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <input
+                    type="number" step="0.01" min="0.01"
+                    className="input w-24 text-center"
+                    value={globalMarkup}
+                    onChange={e => setGlobalMarkup(e.target.value)}
+                    placeholder="如 7.3"
+                  />
+                  <span className="text-sm text-clay-500">×</span>
+                  <button onClick={applyGlobalMarkup} className="btn-primary text-sm whitespace-nowrap">一键应用</button>
+                </div>
+              </div>
+
               {modelList.length === 0 && !modelsLoading && (
                 <div className="rounded-xl border border-clay-200 bg-clay-50 p-8 text-center text-clay-400">
-                  暂无模型数据，请先配置上游接口
+                  暂无模型数据，请先配置上游接口并点击「刷新列表」
                 </div>
               )}
+
               {modelList.length > 0 && (
                 <div className="rounded-xl border border-clay-200 bg-white overflow-hidden">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-xs">
                     <thead className="border-b border-clay-200 bg-clay-50">
                       <tr>
-                        <th className="py-3 px-4 text-left font-medium text-clay-700">模型 ID</th>
-                        <th className="py-3 px-4 text-right font-medium text-clay-700 w-28">输入 /百万</th>
-                        <th className="py-3 px-4 text-right font-medium text-clay-700 w-28">输出 /百万</th>
-                        <th className="py-3 px-4 text-right font-medium text-clay-700 w-20">单次</th>
-                        <th className="py-3 px-4 text-center font-medium text-clay-700 w-20">启用</th>
-                        <th className="py-3 px-4 text-right font-medium text-clay-700 w-28">操作</th>
+                        <th className="py-2.5 px-3 text-left font-medium text-clay-600">模型 ID</th>
+                        <th className="py-2.5 px-3 text-right font-medium text-clay-600 w-32">官方原价 (USD/1M)</th>
+                        <th className="py-2.5 px-3 text-center font-medium text-clay-600 w-20">倍率</th>
+                        <th className="py-2.5 px-3 text-right font-medium text-clay-600 w-28">售价输入/1M</th>
+                        <th className="py-2.5 px-3 text-right font-medium text-clay-600 w-28">售价输出/1M</th>
+                        <th className="py-2.5 px-3 text-center font-medium text-clay-600 w-14">启用</th>
+                        <th className="py-2.5 px-3 text-right font-medium text-clay-600 w-36">操作</th>
                       </tr>
                     </thead>
                     <tbody>
                       {modelList.map(modelId => {
                         const p = modelPrices[modelId];
+                        const off = officialPrices[modelId];
                         const editing = editingPrice?.modelId === modelId;
+                        const tr = testResults[modelId];
+
+                        const previewMarkup = editing ? parseFloat(editingPrice.markup) : (p?.markup ?? 0);
+                        const previewInput = editing
+                          ? (previewMarkup > 0 && off ? off.input * previewMarkup : parseFloat(editingPrice.inputPer1M) || 0)
+                          : (p?.inputPer1M ?? 0);
+                        const previewOutput = editing
+                          ? (previewMarkup > 0 && off ? off.output * previewMarkup : parseFloat(editingPrice.outputPer1M) || 0)
+                          : (p?.outputPer1M ?? 0);
+
                         return (
-                          <tr key={modelId} className="border-b border-clay-100 last:border-0">
-                            <td className="py-3 px-4 text-clay-800 font-mono text-xs truncate max-w-[200px]" title={modelId}>{modelId}</td>
-                            {editing ? (
-                              <>
-                                <td className="py-3 px-4 text-right">
-                                  <input type="number" step="0.0001" className="input py-1 w-24 text-right text-xs"
-                                    value={editingPrice.inputPer1M}
-                                    onChange={e => setEditingPrice({ modelId, inputPer1M: e.target.value, outputPer1M: editingPrice.outputPer1M, perRequest: editingPrice.perRequest, enabled: editingPrice.enabled })}
-                                  />
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <input type="number" step="0.0001" className="input py-1 w-24 text-right text-xs"
-                                    value={editingPrice.outputPer1M}
-                                    onChange={e => setEditingPrice({ modelId, inputPer1M: editingPrice.inputPer1M, outputPer1M: e.target.value, perRequest: editingPrice.perRequest, enabled: editingPrice.enabled })}
-                                  />
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <input type="number" step="0.0001" className="input py-1 w-20 text-right text-xs"
-                                    value={editingPrice.perRequest}
-                                    onChange={e => setEditingPrice({ modelId, inputPer1M: editingPrice.inputPer1M, outputPer1M: editingPrice.outputPer1M, perRequest: e.target.value, enabled: editingPrice.enabled })}
-                                  />
-                                </td>
-                                <td className="py-3 px-4 text-center">
-                                  <label className="flex items-center justify-center gap-1 cursor-pointer">
-                                    <input type="checkbox" checked={p?.enabled ?? true}
-                                      onChange={e => setEditingPrice({ modelId, inputPer1M: editingPrice.inputPer1M, outputPer1M: editingPrice.outputPer1M, perRequest: editingPrice.perRequest, enabled: e.target.checked })}
-                                    />
-                                  </label>
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <button onClick={() => saveModelPrice(modelId, {
-                                    inputPer1M: parseFloat(editingPrice.inputPer1M) || 0,
-                                    outputPer1M: parseFloat(editingPrice.outputPer1M) || 0,
-                                    perRequest: parseFloat(editingPrice.perRequest) || 0,
-                                    enabled: editingPrice.enabled !== false,
-                                  })} className="text-xs text-emerald-600 font-medium px-2 py-1 rounded hover:bg-emerald-50">保存</button>
-                                  <button onClick={() => setEditingPrice(null)} className="text-xs text-clay-400 px-1 ml-1">✕</button>
-                                </td>
-                              </>
-                            ) : (
-                              <>
-                                <td className="py-3 px-4 text-right text-clay-600">{p ? p.inputPer1M.toFixed(4) : '—'}</td>
-                                <td className="py-3 px-4 text-right text-clay-600">{p ? p.outputPer1M.toFixed(4) : '—'}</td>
-                                <td className="py-3 px-4 text-right text-clay-600">{p ? p.perRequest.toFixed(4) : '—'}</td>
-                                <td className="py-3 px-4 text-center">
-                                  {p?.enabled === false ? <ToggleLeft size={16} className="text-clay-400" /> : <ToggleRight size={16} className="text-emerald-500" />}
-                                </td>
-                                <td className="py-3 px-4 text-right">
-                                  <button onClick={() => setEditingPrice({ modelId, inputPer1M: String(p?.inputPer1M ?? 0), outputPer1M: String(p?.outputPer1M ?? 0), perRequest: String(p?.perRequest ?? 0), enabled: p?.enabled !== false })}
-                                    className="text-xs text-clay-600 px-2 py-1 rounded hover:bg-clay-100 mr-1">编辑</button>
-                                  {p && <button onClick={() => deleteModelPrice(modelId)} className="text-xs text-red-600 px-2 py-1 rounded hover:bg-red-50">清除</button>}
-                                </td>
-                              </>
-                            )}
+                          <tr key={modelId} className="border-b border-clay-100 last:border-0 hover:bg-clay-50 transition-colors">
+                            {/* Model ID + test result */}
+                            <td className="py-2 px-3">
+                              <p className="font-mono text-clay-800 truncate max-w-[180px]" title={modelId}>{modelId}</p>
+                              {tr && !tr.loading && (
+                                <p className={`text-xs mt-0.5 ${tr.ok ? 'text-emerald-600' : 'text-red-500'}`}>
+                                  {tr.ok ? `✓ ${tr.latency}ms` : `✗ ${tr.error?.slice(0, 40)}`}
+                                </p>
+                              )}
+                            </td>
+
+                            {/* Official price */}
+                            <td className="py-2 px-3 text-right">
+                              {off ? (
+                                <span className="text-clay-500">
+                                  {off.input > 0 ? `$${off.input}` : <span className="text-emerald-600">免费</span>}
+                                  {off.input > 0 && <span className="text-clay-300"> / ${off.output}</span>}
+                                  {off.note && <span className="text-clay-300 ml-1">({off.note})</span>}
+                                </span>
+                              ) : (
+                                <span className="text-clay-300">—</span>
+                              )}
+                            </td>
+
+                            {/* Markup input */}
+                            <td className="py-2 px-3 text-center">
+                              {editing ? (
+                                <input type="number" step="0.01" min="0"
+                                  className="input py-0.5 w-16 text-center text-xs"
+                                  value={editingPrice.markup}
+                                  onChange={e => setEditingPrice(ep => ep && ({ ...ep, markup: e.target.value }))}
+                                  placeholder="倍率"
+                                />
+                              ) : (
+                                <span className={p?.markup ? 'text-terracotta-600 font-medium' : 'text-clay-300'}>
+                                  {p?.markup ? `${p.markup}×` : '—'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Selling price input */}
+                            <td className="py-2 px-3 text-right">
+                              {editing ? (
+                                <input type="number" step="0.001" min="0"
+                                  className={`input py-0.5 w-24 text-right text-xs ${parseFloat(editingPrice.markup) > 0 && off ? 'bg-clay-50 text-clay-400' : ''}`}
+                                  value={parseFloat(editingPrice.markup) > 0 && off ? (off.input * parseFloat(editingPrice.markup)).toFixed(4) : editingPrice.inputPer1M}
+                                  onChange={e => setEditingPrice(ep => ep && ({ ...ep, inputPer1M: e.target.value, markup: '' }))}
+                                  readOnly={parseFloat(editingPrice.markup) > 0 && !!off}
+                                />
+                              ) : (
+                                <span className={previewInput > 0 ? 'text-clay-700' : 'text-clay-300'}>
+                                  {previewInput > 0 ? previewInput.toFixed(4) : '—'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Selling price output */}
+                            <td className="py-2 px-3 text-right">
+                              {editing ? (
+                                <input type="number" step="0.001" min="0"
+                                  className={`input py-0.5 w-24 text-right text-xs ${parseFloat(editingPrice.markup) > 0 && off ? 'bg-clay-50 text-clay-400' : ''}`}
+                                  value={parseFloat(editingPrice.markup) > 0 && off ? (off.output * parseFloat(editingPrice.markup)).toFixed(4) : editingPrice.outputPer1M}
+                                  onChange={e => setEditingPrice(ep => ep && ({ ...ep, outputPer1M: e.target.value, markup: '' }))}
+                                  readOnly={parseFloat(editingPrice.markup) > 0 && !!off}
+                                />
+                              ) : (
+                                <span className={previewOutput > 0 ? 'text-clay-700' : 'text-clay-300'}>
+                                  {previewOutput > 0 ? previewOutput.toFixed(4) : '—'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Enabled toggle */}
+                            <td className="py-2 px-3 text-center">
+                              {editing ? (
+                                <input type="checkbox" checked={editingPrice.enabled}
+                                  onChange={e => setEditingPrice(ep => ep && ({ ...ep, enabled: e.target.checked }))}
+                                  className="w-3.5 h-3.5 rounded cursor-pointer" />
+                              ) : (
+                                p?.enabled === false
+                                  ? <ToggleLeft size={15} className="text-clay-300 mx-auto" />
+                                  : <ToggleRight size={15} className={`mx-auto ${p ? 'text-emerald-500' : 'text-clay-200'}`} />
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="py-2 px-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                {/* Test button */}
+                                <button
+                                  onClick={() => testModel(modelId)}
+                                  disabled={tr?.loading}
+                                  title="测试连通性"
+                                  className={`px-1.5 py-1 rounded text-xs font-medium transition-colors ${
+                                    tr?.loading ? 'text-clay-300 cursor-wait' :
+                                    tr?.ok ? 'text-emerald-600 hover:bg-emerald-50' :
+                                    tr && !tr.ok ? 'text-red-500 hover:bg-red-50' :
+                                    'text-clay-400 hover:bg-clay-100'
+                                  }`}
+                                >
+                                  {tr?.loading ? '…' : '测试'}
+                                </button>
+
+                                {editing ? (
+                                  <>
+                                    <button onClick={() => saveModelPrice(modelId, {
+                                      inputPer1M: parseFloat(editingPrice.markup) > 0 && off ? off.input * parseFloat(editingPrice.markup) : (parseFloat(editingPrice.inputPer1M) || 0),
+                                      outputPer1M: parseFloat(editingPrice.markup) > 0 && off ? off.output * parseFloat(editingPrice.markup) : (parseFloat(editingPrice.outputPer1M) || 0),
+                                      perRequest: parseFloat(editingPrice.perRequest) || 0,
+                                      enabled: editingPrice.enabled,
+                                      markup: parseFloat(editingPrice.markup) > 0 ? parseFloat(editingPrice.markup) : undefined,
+                                    })} className="px-2 py-1 rounded text-xs font-medium text-emerald-600 hover:bg-emerald-50">保存</button>
+                                    <button onClick={() => setEditingPrice(null)} className="px-1 py-1 rounded text-xs text-clay-400 hover:bg-clay-100">✕</button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <button onClick={() => setEditingPrice({ modelId, markup: String(p?.markup ?? ''), inputPer1M: String(p?.inputPer1M ?? 0), outputPer1M: String(p?.outputPer1M ?? 0), perRequest: String(p?.perRequest ?? 0), enabled: p?.enabled !== false })}
+                                      className="px-2 py-1 rounded text-xs text-clay-500 hover:bg-clay-100">设置</button>
+                                    {p && <button onClick={() => deleteModelPrice(modelId)} className="px-1.5 py-1 rounded text-xs text-red-400 hover:bg-red-50">清除</button>}
+                                  </>
+                                )}
+                              </div>
+                            </td>
                           </tr>
                         );
                       })}

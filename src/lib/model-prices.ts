@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { getOfficialPrice } from './model-official-prices';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const FILE = path.join(DATA_DIR, 'model_prices.json');
@@ -10,6 +11,7 @@ export interface ModelPrice {
   outputPer1M: number;
   perRequest: number;
   enabled: boolean;
+  markup?: number;
   updatedAt: number;
 }
 
@@ -32,7 +34,15 @@ export function getAllModelPrices(): Record<string, ModelPrice> {
 
 export function setModelPrice(modelId: string, price: Omit<ModelPrice, 'modelId' | 'updatedAt'>): void {
   const all = getAllModelPrices();
-  all[modelId] = { ...price, modelId, updatedAt: Date.now() };
+  let entry = { ...price };
+  if (price.markup != null && price.markup > 0) {
+    const official = getOfficialPrice(modelId);
+    if (official) {
+      entry.inputPer1M = official.input * price.markup;
+      entry.outputPer1M = official.output * price.markup;
+    }
+  }
+  all[modelId] = { ...entry, modelId, updatedAt: Date.now() };
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(all, null, 2));
   _cache = all;
