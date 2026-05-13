@@ -12,8 +12,10 @@ async function verifyAdmin(request: NextRequest): Promise<boolean> {
   return token === config.adminPassword;
 }
 
-function pickUpstream(config: SiteConfig): { baseUrl: string; apiKey: string; timeout: number } | null {
-  const channels = (config.upstreams ?? []).filter(c => c.enabled && c.baseUrl && c.apiKey);
+function pickUpstream(config: SiteConfig, type: 'openai' | 'claude' = 'openai'): { baseUrl: string; apiKey: string; timeout: number } | null {
+  const channels = (config.upstreams ?? []).filter(c =>
+    c.enabled && c.baseUrl && c.apiKey && (!c.type || c.type === type || c.type === 'auto')
+  );
   if (channels.length > 0) {
     const totalWeight = channels.reduce((sum, c) => sum + (c.weight || 1), 0);
     let rand = Math.random() * totalWeight;

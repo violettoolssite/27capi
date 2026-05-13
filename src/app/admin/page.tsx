@@ -19,6 +19,7 @@ interface UpstreamChannelForm {
   timeout: number;
   enabled: boolean;
   weight: number;
+  type: 'openai' | 'claude' | 'auto';
 }
 
 interface ConfigState {
@@ -161,7 +162,7 @@ export default function AdminPage() {
         upstreamBaseUrl: data.upstream.baseUrl,
         upstreamApiKey: '',
         upstreamTimeout: data.upstream.timeout,
-        upstreams: (data.upstreams ?? []).map(ch => ({ ...ch, apiKey: '' })),
+        upstreams: (data.upstreams ?? []).map(ch => ({ ...ch, apiKey: '', type: ch.type ?? 'auto' })),
         access: data.access,
         billing: data.billing ?? { enabled: false, deductionPerRequest: 0.001, currency: '¥' },
         registration: data.registration ?? { enabled: true, defaultBalance: 1.0 },
@@ -568,22 +569,44 @@ export default function AdminPage() {
                   <button
                     className="btn-primary text-sm"
                     onClick={() => {
-                      setEditingUpstream({ id: crypto.randomUUID(), name: '', baseUrl: '', apiKey: '', timeout: 60000, enabled: true, weight: 1 });
+                      setEditingUpstream({ id: crypto.randomUUID(), name: '', baseUrl: '', apiKey: '', timeout: 60000, enabled: true, weight: 1, type: 'auto' });
                       setShowAddUpstream(true);
                     }}
                   >
                     <Plus size={14} /> 添加渠道
                   </button>
                 </div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                    <p className="font-medium text-blue-800">🤖 OpenAI 接入地址</p>
+                    <p className="text-blue-600 font-mono text-xs mt-1 break-all">{typeof window !== 'undefined' ? window.location.origin : ''}/v1</p>
+                    <p className="text-xs text-blue-500 mt-1">适用 OpenAI SDK / 兼容客户端</p>
+                  </div>
+                  <div className="rounded-xl border border-orange-200 bg-orange-50 p-3">
+                    <p className="font-medium text-orange-800">🟠 Claude 接入地址</p>
+                    <p className="text-orange-600 font-mono text-xs mt-1 break-all">{typeof window !== 'undefined' ? window.location.origin : ''}/claude</p>
+                    <p className="text-xs text-orange-500 mt-1">适用 Anthropic SDK，x-api-key 鉴权</p>
+                  </div>
+                </div>
                 <div className="flex items-start gap-3 rounded-xl border border-terracotta-200 bg-terracotta-50 p-4 text-sm text-terracotta-700">
                   <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                  <p>上游密钥仅在服务器侧使用，不会暴露给用户。开启多个渠道时按权重加权随机选择。</p>
+                  <p>上游密钥仅在服务器侧使用，不会暴露给用户。开启多个渠道时按权重加权随机选择。类型「通用」的渠道两个入口均可命中。</p>
                 </div>
 
                 {showAddUpstream && editingUpstream && (
                   <div className="rounded-xl border border-clay-200 bg-clay-50 p-5 grid gap-4">
                     <p className="text-sm font-semibold text-clay-800">{form.upstreams.some(u => u.id === editingUpstream.id) ? '编辑渠道' : '添加渠道'}</p>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="col-span-1">
+                        <label className="label">接入协议</label>
+                        <select className="input" value={editingUpstream.type}
+                          onChange={e => setEditingUpstream(u => u && ({ ...u, type: e.target.value as 'openai' | 'claude' | 'auto' }))}>
+                          <option value="auto">🔄 通用 (auto)</option>
+                          <option value="openai">🤖 OpenAI 格式</option>
+                          <option value="claude">🟠 Claude 格式</option>
+                        </select>
+                        <p className="mt-1 text-xs text-clay-400">auto = 两个入口都可用</p>
+                      </div>
                       <div>
                         <label className="label">渠道名称</label>
                         <input className="input" value={editingUpstream.name}
@@ -660,6 +683,9 @@ export default function AdminPage() {
                             <span className="font-medium text-clay-800 text-sm">{ch.name || '未命名渠道'}</span>
                             <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${ch.enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-clay-200 text-clay-500'}`}>
                               {ch.enabled ? '启用' : '停用'}
+                            </span>
+                            <span className="text-xs px-1.5 py-0.5 rounded-full bg-clay-100 text-clay-500">
+                              {ch.type === 'claude' ? '🟠 Claude' : ch.type === 'openai' ? '🤖 OpenAI' : '🔄 通用'}
                             </span>
                             <span className="text-xs text-clay-400">权重 {ch.weight}</span>
                           </div>

@@ -66,6 +66,7 @@ export async function POST(request: NextRequest) {
           timeout: Number(ch.timeout ?? 60000),
           enabled: Boolean(ch.enabled ?? true),
           weight: Number(ch.weight ?? 1),
+          type: (['openai', 'claude', 'auto'].includes(String(ch.type)) ? String(ch.type) : 'auto') as 'openai' | 'claude' | 'auto',
         };
       });
       updates.upstreams = merged;

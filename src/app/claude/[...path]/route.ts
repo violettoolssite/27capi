@@ -7,10 +7,11 @@ import { calculateCost } from '@/lib/model-prices';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
+// Anthropic response headers to forward
 const FORWARDED_RESP_HEADERS = [
-  'content-type', 'x-request-id',
-  'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests',
-  'x-ratelimit-limit-tokens', 'x-ratelimit-remaining-tokens', 'x-ratelimit-reset-tokens',
+  'content-type', 'x-request-id', 'request-id',
+  'anthropic-ratelimit-requests-limit', 'anthropic-ratelimit-requests-remaining', 'anthropic-ratelimit-requests-reset',
+  'anthropic-ratelimit-tokens-limit', 'anthropic-ratelimit-tokens-remaining', 'anthropic-ratelimit-tokens-reset',
   'retry-after',
 ];
 
@@ -18,14 +19,14 @@ function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, X-Requested-With, Accept',
     'Access-Control-Max-Age': '86400',
   };
 }
 
 function pickUpstream(config: SiteConfig): { baseUrl: string; apiKey: string; timeout: number } | null {
   const channels = (config.upstreams ?? []).filter(c =>
-    c.enabled && c.baseUrl && c.apiKey && (!c.type || c.type === 'openai' || c.type === 'auto')
+    c.enabled && c.baseUrl && c.apiKey && (!c.type || c.type === 'claude' || c.type === 'auto')
   );
   if (channels.length > 0) {
     const totalWeight = channels.reduce((sum, c) => sum + (c.weight || 1), 0);
@@ -36,21 +37,18 @@ function pickUpstream(config: SiteConfig): { baseUrl: string; apiKey: string; ti
     }
     return { baseUrl: channels[channels.length - 1].baseUrl, apiKey: channels[channels.length - 1].apiKey, timeout: channels[channels.length - 1].timeout || 60000 };
   }
-  if (config.upstream.baseUrl && config.upstream.apiKey) {
-    return config.upstream;
-  }
+  // Fallback: use legacy single upstream (assume compatible)
+  if (config.upstream.baseUrl && config.upstream.apiKey) return config.upstream;
   return null;
 }
 
 interface UsageData {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
 }
 
 function buildInterceptedStream(
   body: ReadableStream<Uint8Array>,
-  isSSE: boolean,
   onDone: (usage: UsageData | null) => void
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -62,14 +60,16 @@ function buildInterceptedStream(
         reader.read().then(({ done, value }) => {
           if (done) {
             let usage: UsageData | null = null;
-            if (isSSE) {
-              for (const line of buf.split('\n')) {
-                if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-                  try { const d = JSON.parse(line.slice(6)); if (d?.usage) usage = d.usage; } catch {}
-                }
+            for (const line of buf.split('\n')) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const d = JSON.parse(line.slice(6));
+                  if (d?.type === 'message_start' && d?.message?.usage) usage = d.message.usage;
+                  if (d?.type === 'message_delta' && d?.usage) {
+                    usage = { ...usage, output_tokens: d.usage.output_tokens };
+                  }
+                } catch {}
               }
-            } else {
-              try { const d = JSON.parse(buf); if (d?.usage) usage = d.usage; } catch {}
             }
             controller.close();
             onDone(usage);
@@ -93,60 +93,60 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
   const upstream = pickUpstream(config);
   if (!upstream) {
     return Response.json(
-      { error: { message: '上游 API 未配置，请先在管理面板完成配置', type: 'server_error', code: 'upstream_not_configured' } },
+      { type: 'error', error: { type: 'api_error', message: '上游 API 未配置，请先在管理面板完成配置' } },
       { status: 503, headers: corsHeaders() }
     );
   }
 
+  // Claude uses x-api-key header; also accept Authorization: Bearer for compatibility
+  const xApiKey = request.headers.get('x-api-key') ?? '';
   const bearerKey = (request.headers.get('authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+  const clientKey = xApiKey || bearerKey;
+
   let userId: string | null = null;
   let apiKeyId: string | null = null;
-
   const pathStr = params.path.join('/');
-  const isModelsEndpoint = pathStr === 'models';
 
-  if (!isModelsEndpoint) {
-    if (bearerKey.startsWith('sk-27c-')) {
-      const keyHash = hashApiKey(bearerKey);
-      const apiKey = apiKeyDb.findByHash(keyHash);
-      if (!apiKey || apiKey.status !== 'active') {
-        return Response.json({ error: { message: 'Invalid API key', type: 'auth_error' } }, { status: 401, headers: corsHeaders() });
-      }
-      if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
-        return Response.json({ error: { message: 'API key expired', type: 'auth_error' } }, { status: 401, headers: corsHeaders() });
-      }
-      userId = apiKey.userId;
-      apiKeyId = apiKey.id;
-    } else if (config.access.requireRelayKey && bearerKey !== config.access.relayKey) {
-      return Response.json({ error: { message: 'Invalid relay key', type: 'auth_error' } }, { status: 401, headers: corsHeaders() });
+  if (clientKey.startsWith('sk-27c-')) {
+    const keyHash = hashApiKey(clientKey);
+    const apiKey = apiKeyDb.findByHash(keyHash);
+    if (!apiKey || apiKey.status !== 'active') {
+      return Response.json({ type: 'error', error: { type: 'authentication_error', message: 'Invalid API key' } }, { status: 401, headers: corsHeaders() });
     }
+    if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
+      return Response.json({ type: 'error', error: { type: 'authentication_error', message: 'API key expired' } }, { status: 401, headers: corsHeaders() });
+    }
+    userId = apiKey.userId;
+    apiKeyId = apiKey.id;
+  } else if (config.access.requireRelayKey && clientKey !== config.access.relayKey) {
+    return Response.json({ type: 'error', error: { type: 'authentication_error', message: 'Invalid relay key' } }, { status: 401, headers: corsHeaders() });
+  }
 
-    if (userId) {
-      const user = userDb.findById(userId);
-      if (!user || user.status !== 'active') {
-        return Response.json({ error: { message: '账号已被禁用', type: 'auth_error' } }, { status: 403, headers: corsHeaders() });
-      }
-      if (config.billing.enabled && user.balance < config.billing.deductionPerRequest) {
-        return Response.json({ error: { message: '余额不足，请联系管理员充值', type: 'billing_error' } }, { status: 402, headers: corsHeaders() });
-      }
-    } else if (config.access.requireRelayKey) {
-      if (!bearerKey || bearerKey !== config.access.relayKey) {
-        return Response.json({ error: { message: 'Unauthorized', type: 'auth_error' } }, { status: 401, headers: corsHeaders() });
-      }
+  if (userId) {
+    const user = userDb.findById(userId);
+    if (!user || user.status !== 'active') {
+      return Response.json({ type: 'error', error: { type: 'permission_error', message: '账号已被禁用' } }, { status: 403, headers: corsHeaders() });
+    }
+    if (config.billing.enabled && user.balance < config.billing.deductionPerRequest) {
+      return Response.json({ type: 'error', error: { type: 'permission_error', message: '余额不足，请联系管理员充值' } }, { status: 402, headers: corsHeaders() });
     }
   }
 
   const upstreamBase = upstream.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   const upstreamUrl = `${upstreamBase}/v1/${pathStr}${new URL(request.url).search}`;
 
-  const forwardHeaders: Record<string, string> = { Authorization: `Bearer ${upstream.apiKey}` };
+  const forwardHeaders: Record<string, string> = {
+    'x-api-key': upstream.apiKey,
+    'anthropic-version': request.headers.get('anthropic-version') || '2023-06-01',
+  };
   const ct = request.headers.get('content-type');
   if (ct) forwardHeaders['Content-Type'] = ct;
+  const beta = request.headers.get('anthropic-beta');
+  if (beta) forwardHeaders['anthropic-beta'] = beta;
 
   const hasBody = !['GET', 'HEAD'].includes(request.method.toUpperCase());
   const body = hasBody ? await request.arrayBuffer().catch(() => undefined) : undefined;
 
-  // Parse model name from request body for per-model pricing
   let requestedModel: string | null = null;
   if (body && ct?.includes('application/json')) {
     try {
@@ -167,7 +167,7 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
     });
   } catch (err: unknown) {
     return Response.json(
-      { error: { message: `无法连接上游: ${err instanceof Error ? err.message : String(err)}`, type: 'server_error' } },
+      { type: 'error', error: { type: 'api_error', message: `无法连接上游: ${err instanceof Error ? err.message : String(err)}` } },
       { status: 502, headers: corsHeaders() }
     );
   }
@@ -190,29 +190,33 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
     const _billingEnabled = config.billing.enabled;
     const _fallback = config.billing.deductionPerRequest;
 
-    const intercepted = buildInterceptedStream(upstreamResp.body, isSSE, (usage) => {
-      const promptTokens = usage?.prompt_tokens ?? 0;
-      const completionTokens = usage?.completion_tokens ?? 0;
-      const cost = _billingEnabled
-        ? calculateCost(_model, promptTokens, completionTokens, _fallback)
-        : 0;
-      userDb.deductBalance(_userId, cost);
-      apiKeyDb.incrementUsage(_apiKeyId);
-      appendUsageLog({
-        userId: _userId,
-        apiKeyId: _apiKeyId,
-        model: _model,
-        promptTokens,
-        completionTokens,
-        totalTokens: usage?.total_tokens ?? 0,
-        cost,
-        requestPath: _path,
-        statusCode,
-        createdAt: Date.now(),
+    if (isSSE) {
+      const intercepted = buildInterceptedStream(upstreamResp.body, (usage) => {
+        const promptTokens = usage?.input_tokens ?? 0;
+        const completionTokens = usage?.output_tokens ?? 0;
+        const cost = _billingEnabled
+          ? calculateCost(_model, promptTokens, completionTokens, _fallback)
+          : 0;
+        userDb.deductBalance(_userId, cost);
+        apiKeyDb.incrementUsage(_apiKeyId);
+        appendUsageLog({ userId: _userId, apiKeyId: _apiKeyId, model: _model, promptTokens, completionTokens, totalTokens: promptTokens + completionTokens, cost, requestPath: _path, statusCode, createdAt: Date.now() });
       });
-    });
-
-    return new Response(intercepted, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
+      return new Response(intercepted, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
+    } else {
+      const text = await upstreamResp.text();
+      try {
+        const d = JSON.parse(text);
+        const promptTokens = d?.usage?.input_tokens ?? 0;
+        const completionTokens = d?.usage?.output_tokens ?? 0;
+        const cost = _billingEnabled
+          ? calculateCost(_model, promptTokens, completionTokens, _fallback)
+          : 0;
+        userDb.deductBalance(_userId, cost);
+        apiKeyDb.incrementUsage(_apiKeyId);
+        appendUsageLog({ userId: _userId, apiKeyId: _apiKeyId, model: _model, promptTokens, completionTokens, totalTokens: promptTokens + completionTokens, cost, requestPath: _path, statusCode, createdAt: Date.now() });
+      } catch {}
+      return new Response(text, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
+    }
   }
 
   return new Response(upstreamResp.body, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
@@ -221,23 +225,9 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
 export async function GET(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   return relay(request, params);
 }
-
 export async function POST(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   return relay(request, params);
 }
-
-export async function PUT(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return relay(request, params);
-}
-
-export async function DELETE(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return relay(request, params);
-}
-
-export async function PATCH(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
-  return relay(request, params);
-}
-
 export async function OPTIONS() {
   return new Response(null, { status: 204, headers: corsHeaders() });
 }

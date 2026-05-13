@@ -3,6 +3,8 @@ import path from 'path';
 
 const CONFIG_PATH = path.join(process.cwd(), 'data', 'config.json');
 
+export type UpstreamType = 'openai' | 'claude' | 'auto';
+
 export interface UpstreamChannel {
   id: string;
   name: string;
@@ -11,6 +13,7 @@ export interface UpstreamChannel {
   timeout: number;
   enabled: boolean;
   weight: number;
+  type: UpstreamType;
 }
 
 export interface SiteConfig {
