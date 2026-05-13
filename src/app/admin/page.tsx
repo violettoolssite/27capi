@@ -70,6 +70,28 @@ function Toast({ msg, ok }: { msg: string; ok: boolean }) {
   );
 }
 
+function lookupOfficialPrice(
+  modelId: string,
+  official: Record<string, { input: number; output: number; note?: string }>
+): { input: number; output: number; note?: string } | undefined {
+  if (official[modelId]) return official[modelId];
+  // Strip date suffix: gpt-4o-2024-11-20 → gpt-4o
+  const noDate = modelId.replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  if (noDate !== modelId && official[noDate]) return official[noDate];
+  // Strip -latest suffix
+  const noLatest = modelId.replace(/-latest$/, '');
+  if (noLatest !== modelId && official[noLatest]) return official[noLatest];
+  // Strip provider prefix: openai/gpt-4o → gpt-4o
+  const slashIdx = modelId.indexOf('/');
+  if (slashIdx !== -1) {
+    const noPrefix = modelId.slice(slashIdx + 1);
+    if (official[noPrefix]) return official[noPrefix];
+    const noPrefixNoDate = noPrefix.replace(/-\d{4}-\d{2}-\d{2}$/, '').replace(/-latest$/, '');
+    if (official[noPrefixNoDate]) return official[noPrefixNoDate];
+  }
+  return undefined;
+}
+
 const TABS: { id: Tab; label: string; icon: ElementType }[] = [
   { id: 'site', label: '站点设置', icon: Settings },
   { id: 'upstream', label: '上游渠道', icon: Server },
@@ -299,7 +321,7 @@ export default function AdminPage() {
       body: JSON.stringify({ modelId, ...data }),
     });
     if (res.ok) {
-      const official = officialPrices[modelId];
+      const official = lookupOfficialPrice(modelId, officialPrices);
       const markup = data.markup && data.markup > 0 ? data.markup : undefined;
       const computed = markup && official
         ? { inputPer1M: official.input * markup, outputPer1M: official.output * markup }
@@ -314,10 +336,10 @@ export default function AdminPage() {
     const m = parseFloat(globalMarkup);
     if (!m || m <= 0) { showToast('请输入有效的折扣倍率', false); return; }
     const pwd = sessionStorage.getItem('27c_admin_pwd') ?? password;
-    const toSave = modelList.filter(id => officialPrices[id]);
+    const toSave = modelList.filter(id => lookupOfficialPrice(id, officialPrices));
     let ok = 0;
     for (const modelId of toSave) {
-      const official = officialPrices[modelId];
+      const official = lookupOfficialPrice(modelId, officialPrices)!
       if (!official) continue;
       const existing = modelPrices[modelId];
       await fetch('/api/admin/model-prices', {
@@ -330,7 +352,7 @@ export default function AdminPage() {
     setModelPrices(prev => {
       const next = { ...prev };
       for (const modelId of toSave) {
-        const official = officialPrices[modelId];
+        const official = lookupOfficialPrice(modelId, officialPrices);
         if (!official) continue;
         const existing = prev[modelId];
         next[modelId] = { inputPer1M: official.input * m, outputPer1M: official.output * m, perRequest: existing?.perRequest ?? 0, enabled: existing?.enabled ?? true, markup: m };
@@ -1166,7 +1188,7 @@ export default function AdminPage() {
                     <tbody>
                       {modelList.map(modelId => {
                         const p = modelPrices[modelId];
-                        const off = officialPrices[modelId];
+                        const off = lookupOfficialPrice(modelId, officialPrices);
                         const editing = editingPrice?.modelId === modelId;
                         const tr = testResults[modelId];
 
