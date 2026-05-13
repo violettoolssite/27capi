@@ -3,6 +3,16 @@ import path from 'path';
 
 const CONFIG_PATH = path.join(process.cwd(), 'data', 'config.json');
 
+export interface UpstreamChannel {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  timeout: number;
+  enabled: boolean;
+  weight: number;
+}
+
 export interface SiteConfig {
   siteName: string;
   siteDescription: string;
@@ -17,6 +27,7 @@ export interface SiteConfig {
     apiKey: string;
     timeout: number;
   };
+  upstreams: UpstreamChannel[];
   access: {
     requireRelayKey: boolean;
     relayKey: string;
@@ -74,6 +85,7 @@ export const DEFAULT_CONFIG: SiteConfig = {
     apiKey: '',
     timeout: 60000,
   },
+  upstreams: [],
   access: {
     requireRelayKey: false,
     relayKey: '',
@@ -159,17 +171,27 @@ export async function saveConfig(updates: Partial<SiteConfig>): Promise<void> {
   _cacheTime = Date.now();
 }
 
-export function getSafeConfig(config: SiteConfig): Omit<SiteConfig, 'adminPassword' | 'upstream'> & {
-  upstream: { baseUrl: string; timeout: number; configured: boolean };
+type SafeUpstreamChannel = { id: string; name: string; baseUrl: string; timeout: number; enabled: boolean; weight: number; apiKeyMasked: string };
+
+export function getSafeConfig(config: SiteConfig): Omit<SiteConfig, 'adminPassword' | 'upstream' | 'upstreams'> & {
+  upstream: { baseUrl: string; timeout: number; configured: boolean; apiKeyMasked: string };
+  upstreams: SafeUpstreamChannel[];
 } {
-  const { adminPassword: _ap, upstream, ...rest } = config;
+  const { adminPassword: _ap, upstream, upstreams, ...rest } = config;
   return {
     ...rest,
     upstream: {
       baseUrl: upstream.baseUrl,
       timeout: upstream.timeout,
       configured: !!(upstream.baseUrl && upstream.apiKey),
+      apiKeyMasked: upstream.apiKey
+        ? upstream.apiKey.slice(0, 6) + '••••' + upstream.apiKey.slice(-4)
+        : '',
     },
+    upstreams: (upstreams ?? []).map(({ apiKey, ...ch }) => ({
+      ...ch,
+      apiKeyMasked: apiKey ? apiKey.slice(0, 6) + '••••' + apiKey.slice(-4) : '',
+    })),
   };
 }
 

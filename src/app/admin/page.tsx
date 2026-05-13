@@ -6,10 +6,20 @@ import Image from 'next/image';
 import {
   Settings, Server, Palette, Lock, Home, Save, Eye, EyeOff,
   Upload, AlertCircle, CheckCircle, RotateCcw, ExternalLink,
-  Users, Plus, Trash2, RefreshCw, ToggleLeft, ToggleRight, DollarSign,
+  Users, Plus, Trash2, RefreshCw, ToggleLeft, ToggleRight, DollarSign, Mail,
 } from 'lucide-react';
 
-type Tab = 'site' | 'upstream' | 'branding' | 'access' | 'users' | 'pricing';
+type Tab = 'site' | 'upstream' | 'branding' | 'access' | 'users' | 'pricing' | 'email';
+
+interface UpstreamChannelForm {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  timeout: number;
+  enabled: boolean;
+  weight: number;
+}
 
 interface ConfigState {
   siteName: string;
@@ -19,10 +29,13 @@ interface ConfigState {
   logoUrl: string | null;
   faviconUrl: string | null;
   upstream: { baseUrl: string; apiKeyMasked: string; timeout: number; configured: boolean };
+  upstreams: UpstreamChannelForm[];
   access: { requireRelayKey: boolean; relayKey: string };
   billing: { enabled: boolean; deductionPerRequest: number; currency: string };
   registration: { enabled: boolean; defaultBalance: number };
   customCss: string;
+  smtp: { host: string; port: number; user: string; pass: string; fromName: string; fromEmail: string };
+  emailVerification: { enabled: boolean; whitelist: string[] };
 }
 
 interface AdminUser {
@@ -59,9 +72,10 @@ function Toast({ msg, ok }: { msg: string; ok: boolean }) {
 
 const TABS: { id: Tab; label: string; icon: ElementType }[] = [
   { id: 'site', label: '站点设置', icon: Settings },
-  { id: 'upstream', label: '上游接口', icon: Server },
+  { id: 'upstream', label: '上游渠道', icon: Server },
   { id: 'branding', label: '品牌定制', icon: Palette },
   { id: 'access', label: '访问控制', icon: Lock },
+  { id: 'email', label: '邮件服务', icon: Mail },
   { id: 'users', label: '用户管理', icon: Users },
   { id: 'pricing', label: '模型定价', icon: DollarSign },
 ];
@@ -86,6 +100,9 @@ export default function AdminPage() {
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [createUserForm, setCreateUserForm] = useState<CreateUserForm>({ username: '', email: '', password: '', role: 'user', balance: '0' });
   const [editBalance, setEditBalance] = useState<{ id: string; value: string } | null>(null);
+
+  const [editingUpstream, setEditingUpstream] = useState<UpstreamChannelForm | null>(null);
+  const [showAddUpstream, setShowAddUpstream] = useState(false);
 
   const [modelList, setModelList] = useState<string[]>([]);
   const [modelPrices, setModelPrices] = useState<Record<string, { inputPer1M: number; outputPer1M: number; perRequest: number; enabled: boolean }>>({});
@@ -119,10 +136,13 @@ export default function AdminPage() {
         upstreamBaseUrl: data.upstream.baseUrl,
         upstreamApiKey: '',
         upstreamTimeout: data.upstream.timeout,
+        upstreams: (data.upstreams ?? []).map(ch => ({ ...ch, apiKey: '' })),
         access: data.access,
         billing: data.billing ?? { enabled: false, deductionPerRequest: 0.001, currency: '¥' },
         registration: data.registration ?? { enabled: true, defaultBalance: 1.0 },
         customCss: data.customCss,
+        smtp: data.smtp ?? { host: '', port: 587, user: '', pass: '', fromName: '', fromEmail: '' },
+        emailVerification: data.emailVerification ?? { enabled: false, whitelist: [] },
         newAdminPassword: '',
         confirmAdminPassword: '',
       });
@@ -164,9 +184,12 @@ export default function AdminPage() {
           customCss: form.customCss,
           upstream: { baseUrl: form.upstreamBaseUrl, timeout: form.upstreamTimeout },
           upstreamApiKey: form.upstreamApiKey,
+          upstreams: form.upstreams,
           access: form.access,
           billing: form.billing,
           registration: form.registration,
+          smtp: form.smtp,
+          emailVerification: form.emailVerification,
           ...(form.newAdminPassword ? { newAdminPassword: form.newAdminPassword } : {}),
         }),
       });
@@ -455,62 +478,159 @@ export default function AdminPage() {
           )}
 
           {tab === 'upstream' && (
-            <div className="card flex flex-col gap-6">
-              <div>
-                <h2 className="text-lg font-bold text-clay-900">上游接口配置</h2>
-                <p className="text-sm text-clay-500 mt-0.5">配置需要中转的上游 OpenAI 兼容 API</p>
-              </div>
-              <hr className="border-clay-200" />
-              <div
-                className="flex items-start gap-3 rounded-xl border border-terracotta-200 bg-terracotta-50 p-4 text-sm text-terracotta-700"
-              >
-                <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                <p>上游密钥仅在服务器侧使用，不会暴露给前端或用户。请确保使用具有足够权限的 API Key。</p>
-              </div>
-              <div className="grid gap-5">
-                <div>
-                  <label className="label">上游 API 地址</label>
-                  <input
-                    type="url"
-                    className="input"
-                    value={form.upstreamBaseUrl}
-                    onChange={(e) => updateForm('upstreamBaseUrl', e.target.value)}
-                    placeholder="https://api.openai.com"
-                  />
-                  <p className="mt-1.5 text-xs text-clay-400">不要包含 /v1，系统会自动附加</p>
-                </div>
-                <div>
-                  <label className="label">上游 API Key</label>
-                  <div className="relative">
-                    <input
-                      type={showKey ? 'text' : 'password'}
-                      className="input pr-10"
-                      value={form.upstreamApiKey}
-                      onChange={(e) => updateForm('upstreamApiKey', e.target.value)}
-                      placeholder="输入新密钥（留空保持不变）"
-                      autoComplete="new-password"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((v) => !v)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-clay-400 hover:text-clay-700"
-                    >
-                      {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
-                    </button>
+            <div className="flex flex-col gap-6">
+              <div className="card flex flex-col gap-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-clay-900">上游渠道管理</h2>
+                    <p className="text-sm text-clay-500 mt-0.5">支持多个上游渠道，按权重随机负载均衡</p>
                   </div>
-                  <p className="mt-1.5 text-xs text-clay-400">留空则保持当前密钥不变</p>
+                  <button
+                    className="btn-primary text-sm"
+                    onClick={() => {
+                      setEditingUpstream({ id: crypto.randomUUID(), name: '', baseUrl: '', apiKey: '', timeout: 60000, enabled: true, weight: 1 });
+                      setShowAddUpstream(true);
+                    }}
+                  >
+                    <Plus size={14} /> 添加渠道
+                  </button>
                 </div>
+                <div className="flex items-start gap-3 rounded-xl border border-terracotta-200 bg-terracotta-50 p-4 text-sm text-terracotta-700">
+                  <AlertCircle size={16} className="shrink-0 mt-0.5" />
+                  <p>上游密钥仅在服务器侧使用，不会暴露给用户。开启多个渠道时按权重加权随机选择。</p>
+                </div>
+
+                {showAddUpstream && editingUpstream && (
+                  <div className="rounded-xl border border-clay-200 bg-clay-50 p-5 grid gap-4">
+                    <p className="text-sm font-semibold text-clay-800">{form.upstreams.some(u => u.id === editingUpstream.id) ? '编辑渠道' : '添加渠道'}</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="label">渠道名称</label>
+                        <input className="input" value={editingUpstream.name}
+                          onChange={e => setEditingUpstream(u => u && ({ ...u, name: e.target.value }))}
+                          placeholder="OpenAI / Claude / 自建" />
+                      </div>
+                      <div>
+                        <label className="label">权重 <span className="text-clay-400 font-normal">(越大被选概率越高)</span></label>
+                        <input className="input" type="number" min={1} value={editingUpstream.weight}
+                          onChange={e => setEditingUpstream(u => u && ({ ...u, weight: parseInt(e.target.value) || 1 }))} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label">API 地址</label>
+                      <input className="input" type="url" value={editingUpstream.baseUrl}
+                        onChange={e => setEditingUpstream(u => u && ({ ...u, baseUrl: e.target.value }))}
+                        placeholder="https://api.openai.com" />
+                      <p className="mt-1 text-xs text-clay-400">不要包含 /v1</p>
+                    </div>
+                    <div>
+                      <label className="label">API Key <span className="text-clay-400 font-normal">(留空保持原有)</span></label>
+                      <input className="input font-mono" type="password"
+                        value={editingUpstream.apiKey}
+                        onChange={e => setEditingUpstream(u => u && ({ ...u, apiKey: e.target.value }))}
+                        placeholder="输入密钥"
+                        autoComplete="new-password" />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="label">超时(毫秒)</label>
+                        <input className="input" type="number" min={5000} max={300000} step={1000}
+                          value={editingUpstream.timeout}
+                          onChange={e => setEditingUpstream(u => u && ({ ...u, timeout: parseInt(e.target.value) || 60000 }))} />
+                      </div>
+                      <div className="flex items-end pb-2">
+                        <label className="flex items-center gap-2 cursor-pointer text-sm">
+                          <input type="checkbox" checked={editingUpstream.enabled}
+                            onChange={e => setEditingUpstream(u => u && ({ ...u, enabled: e.target.checked }))}
+                            className="w-4 h-4 rounded" />
+                          启用该渠道
+                        </label>
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button className="btn-secondary" onClick={() => { setShowAddUpstream(false); setEditingUpstream(null); }}>取消</button>
+                      <button className="btn-primary" onClick={() => {
+                        if (!editingUpstream) return;
+                        setForm(f => {
+                          if (!f) return f;
+                          const exists = f.upstreams.some(u => u.id === editingUpstream.id);
+                          const upstreams = exists
+                            ? f.upstreams.map(u => u.id === editingUpstream.id ? editingUpstream : u)
+                            : [...f.upstreams, editingUpstream];
+                          return { ...f, upstreams };
+                        });
+                        setShowAddUpstream(false);
+                        setEditingUpstream(null);
+                      }}>确定</button>
+                    </div>
+                  </div>
+                )}
+
+                {form.upstreams.length === 0 ? (
+                  <div className="text-center py-8 text-clay-400">
+                    <Server size={28} className="mx-auto mb-2 opacity-30" />
+                    <p className="text-sm">暂无渠道，点击「添加渠道」创建第一个</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {form.upstreams.map((ch, idx) => (
+                      <div key={ch.id} className="flex items-center gap-3 rounded-xl border border-clay-200 bg-white px-4 py-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-clay-800 text-sm">{ch.name || '未命名渠道'}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${ch.enabled ? 'bg-emerald-50 text-emerald-600' : 'bg-clay-200 text-clay-500'}`}>
+                              {ch.enabled ? '启用' : '停用'}
+                            </span>
+                            <span className="text-xs text-clay-400">权重 {ch.weight}</span>
+                          </div>
+                          <p className="text-xs text-clay-400 mt-0.5 truncate">{ch.baseUrl || '未设置地址'}</p>
+                        </div>
+                        <button className="text-xs text-clay-500 hover:text-terracotta-600 px-2 py-1 rounded hover:bg-clay-100"
+                          onClick={() => { setEditingUpstream({ ...ch }); setShowAddUpstream(true); }}>
+                          编辑
+                        </button>
+                        <button className="p-1.5 rounded-lg text-clay-400 hover:bg-red-50 hover:text-red-500"
+                          onClick={() => setForm(f => f && ({ ...f, upstreams: f.upstreams.filter((_, i) => i !== idx) }))}>
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="card flex flex-col gap-6">
                 <div>
-                  <label className="label">超时时间（毫秒）</label>
-                  <input
-                    type="number"
-                    className="input"
-                    value={form.upstreamTimeout}
-                    onChange={(e) => updateForm('upstreamTimeout', Number(e.target.value))}
-                    min={5000}
-                    max={300000}
-                    step={1000}
-                  />
+                  <h2 className="text-base font-bold text-clay-900">备用单上游（兼容旧配置）</h2>
+                  <p className="text-sm text-clay-500 mt-0.5">当上方渠道列表为空时使用此设置</p>
+                </div>
+                <div className="grid gap-4">
+                  <div>
+                    <label className="label">API 地址</label>
+                    <input type="url" className="input" value={form.upstreamBaseUrl}
+                      onChange={(e) => updateForm('upstreamBaseUrl', e.target.value)}
+                      placeholder="https://api.openai.com" />
+                    <p className="mt-1.5 text-xs text-clay-400">不要包含 /v1</p>
+                  </div>
+                  <div>
+                    <label className="label">API Key <span className="text-clay-400 font-normal">(留空保持不变)</span></label>
+                    <div className="relative">
+                      <input type={showKey ? 'text' : 'password'} className="input pr-10"
+                        value={form.upstreamApiKey}
+                        onChange={(e) => updateForm('upstreamApiKey', e.target.value)}
+                        placeholder="输入新密钥" autoComplete="new-password" />
+                      <button type="button" onClick={() => setShowKey(v => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-clay-400 hover:text-clay-700">
+                        {showKey ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="label">超时时间（毫秒）</label>
+                    <input type="number" className="input" value={form.upstreamTimeout}
+                      onChange={(e) => updateForm('upstreamTimeout', Number(e.target.value))}
+                      min={5000} max={300000} step={1000} />
+                  </div>
                 </div>
               </div>
             </div>
@@ -843,6 +963,91 @@ export default function AdminPage() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'email' && (
+            <div className="card flex flex-col gap-6">
+              <div>
+                <h2 className="text-lg font-bold text-clay-900">邮件服务配置</h2>
+                <p className="text-sm text-clay-500 mt-0.5">SMTP 发信设置 + 邮筱验证功能</p>
+              </div>
+              <hr className="border-clay-200" />
+              <div className="grid gap-5">
+                <div>
+                  <label className="label">SMTP 主机</label>
+                  <input className="input"
+                    value={form.smtp.host}
+                    onChange={e => updateForm('smtp', { ...form.smtp, host: e.target.value })}
+                    placeholder="smtp.gmail.com / smtp.qq.com / smtp.resend.com" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="label">端口</label>
+                    <input className="input" type="number"
+                      value={form.smtp.port}
+                      onChange={e => updateForm('smtp', { ...form.smtp, port: parseInt(e.target.value) || 587 })}
+                      placeholder="587 (TLS) / 465 (SSL)" />
+                  </div>
+                  <div>
+                    <label className="label">发件人名称</label>
+                    <input className="input"
+                      value={form.smtp.fromName}
+                      onChange={e => updateForm('smtp', { ...form.smtp, fromName: e.target.value })}
+                      placeholder="27c API" />
+                  </div>
+                </div>
+                <div>
+                  <label className="label">SMTP 用户名 / 邮筱</label>
+                  <input className="input"
+                    value={form.smtp.user}
+                    onChange={e => updateForm('smtp', { ...form.smtp, user: e.target.value })}
+                    placeholder="noreply@example.com" />
+                </div>
+                <div>
+                  <label className="label">SMTP 密码 / 专用密码</label>
+                  <input className="input" type="password"
+                    value={form.smtp.pass}
+                    onChange={e => updateForm('smtp', { ...form.smtp, pass: e.target.value })}
+                    placeholder="••••••••" />
+                </div>
+                <div>
+                  <label className="label">发件人邮筱 <span className="text-clay-400 font-normal">(可选，默认使用用户名)</span></label>
+                  <input className="input"
+                    value={form.smtp.fromEmail}
+                    onChange={e => updateForm('smtp', { ...form.smtp, fromEmail: e.target.value })}
+                    placeholder="noreply@example.com" />
+                </div>
+              </div>
+              <hr className="border-clay-200" />
+              <div className="flex items-center justify-between p-4 rounded-xl border border-clay-200 bg-clay-50">
+                <div>
+                  <h3 className="font-medium text-clay-900">邮筱验证</h3>
+                  <p className="text-xs text-clay-500 mt-0.5">注册时发送验证邮件，防止恶意批量注册</p>
+                </div>
+                <button
+                  onClick={() => updateForm('emailVerification', { ...form.emailVerification, enabled: !form.emailVerification.enabled })}
+                  className={`relative h-6 w-11 rounded-full transition-colors ${
+                    form.emailVerification.enabled ? 'bg-terracotta-500' : 'bg-clay-300'
+                  }`}>
+                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                    form.emailVerification.enabled ? 'translate-x-5' : 'translate-x-0.5'
+                  }`} />
+                </button>
+              </div>
+              {form.emailVerification.enabled && (
+                <div>
+                  <label className="label">邮筱域名白名单 <span className="text-clay-400 font-normal">(每行一个域名，留空则允许所有)</span></label>
+                  <textarea className="input min-h-[100px] font-mono text-xs"
+                    value={form.emailVerification.whitelist.join('\n')}
+                    onChange={e => updateForm('emailVerification', {
+                      ...form.emailVerification,
+                      whitelist: e.target.value.split('\n').map(d => d.trim()).filter(Boolean)
+                    })}
+                    placeholder="gmail.com&#10;qq.com&#10;163.com" />
+                  <p className="text-xs text-clay-400 mt-1.5">仅允许指定后缀的邮筱注册，有效防止批量垃圾账号</p>
                 </div>
               )}
             </div>

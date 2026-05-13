@@ -1,5 +1,5 @@
 import { type NextRequest } from 'next/server';
-import { getConfig, saveConfig, getSafeConfig } from '@/lib/config';
+import { getConfig, saveConfig, getSafeConfig, type UpstreamChannel } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -18,16 +18,7 @@ export async function GET(request: NextRequest) {
   }
   const config = await getConfig();
   const safe = getSafeConfig(config);
-  return Response.json({
-    ...safe,
-    upstream: {
-      ...safe.upstream,
-      apiKeyMasked: config.upstream.apiKey
-        ? config.upstream.apiKey.slice(0, 8) + '••••••••' + config.upstream.apiKey.slice(-4)
-        : '',
-    },
-    adminPassword: '',
-  });
+  return Response.json({ ...safe, adminPassword: '' });
 }
 
 export async function POST(request: NextRequest) {
@@ -36,9 +27,7 @@ export async function POST(request: NextRequest) {
   }
   try {
     const body = await request.json();
-
-    const { newAdminPassword, upstreamApiKey, ...rest } = body as Record<string, unknown>;
-
+    const { newAdminPassword, upstreamApiKey, upstreams: rawUpstreams, ...rest } = body as Record<string, unknown>;
     const updates: Record<string, unknown> = { ...rest };
 
     if (typeof newAdminPassword === 'string' && newAdminPassword.length >= 6) {
@@ -58,6 +47,28 @@ export async function POST(request: NextRequest) {
         const current = await getConfig();
         updates.upstream = { ...u, apiKey: current.upstream.apiKey };
       }
+    }
+
+    if (Array.isArray(rawUpstreams)) {
+      const current = await getConfig();
+      const currentMap = new Map((current.upstreams ?? []).map(c => [c.id, c]));
+      const merged: UpstreamChannel[] = rawUpstreams.map((ch: Record<string, unknown>) => {
+        const id = String(ch.id ?? '');
+        const existing = currentMap.get(id);
+        const newKey = typeof ch.apiKey === 'string' && ch.apiKey && !ch.apiKey.includes('••')
+          ? ch.apiKey
+          : (existing?.apiKey ?? '');
+        return {
+          id,
+          name: String(ch.name ?? ''),
+          baseUrl: String(ch.baseUrl ?? ''),
+          apiKey: newKey,
+          timeout: Number(ch.timeout ?? 60000),
+          enabled: Boolean(ch.enabled ?? true),
+          weight: Number(ch.weight ?? 1),
+        };
+      });
+      updates.upstreams = merged;
     }
 
     await saveConfig(updates as Parameters<typeof saveConfig>[0]);

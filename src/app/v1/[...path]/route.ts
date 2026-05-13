@@ -1,5 +1,5 @@
 import { type NextRequest } from 'next/server';
-import { getConfig } from '@/lib/config';
+import { getConfig, type SiteConfig } from '@/lib/config';
 import { apiKeyDb, userDb, appendUsageLog } from '@/lib/db';
 import { hashApiKey } from '@/lib/auth';
 import { calculateCost } from '@/lib/model-prices';
@@ -21,6 +21,23 @@ function corsHeaders() {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Accept',
     'Access-Control-Max-Age': '86400',
   };
+}
+
+function pickUpstream(config: SiteConfig): { baseUrl: string; apiKey: string; timeout: number } | null {
+  const channels = (config.upstreams ?? []).filter(c => c.enabled && c.baseUrl && c.apiKey);
+  if (channels.length > 0) {
+    const totalWeight = channels.reduce((sum, c) => sum + (c.weight || 1), 0);
+    let rand = Math.random() * totalWeight;
+    for (const ch of channels) {
+      rand -= (ch.weight || 1);
+      if (rand <= 0) return { baseUrl: ch.baseUrl, apiKey: ch.apiKey, timeout: ch.timeout || 60000 };
+    }
+    return { baseUrl: channels[channels.length - 1].baseUrl, apiKey: channels[channels.length - 1].apiKey, timeout: channels[channels.length - 1].timeout || 60000 };
+  }
+  if (config.upstream.baseUrl && config.upstream.apiKey) {
+    return config.upstream;
+  }
+  return null;
 }
 
 interface UsageData {
@@ -71,7 +88,8 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
   const params = await paramsPromise;
   const config = await getConfig();
 
-  if (!config.upstream.baseUrl || !config.upstream.apiKey) {
+  const upstream = pickUpstream(config);
+  if (!upstream) {
     return Response.json(
       { error: { message: '上游 API 未配置，请先在管理面板完成配置', type: 'server_error', code: 'upstream_not_configured' } },
       { status: 503, headers: corsHeaders() }
@@ -116,10 +134,10 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
     }
   }
 
-  const upstreamBase = config.upstream.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+  const upstreamBase = upstream.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
   const upstreamUrl = `${upstreamBase}/v1/${pathStr}${new URL(request.url).search}`;
 
-  const forwardHeaders: Record<string, string> = { Authorization: `Bearer ${config.upstream.apiKey}` };
+  const forwardHeaders: Record<string, string> = { Authorization: `Bearer ${upstream.apiKey}` };
   const ct = request.headers.get('content-type');
   if (ct) forwardHeaders['Content-Type'] = ct;
 
@@ -135,15 +153,15 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
     } catch {}
   }
 
-  let upstream: Response;
+  let upstreamResp: Response;
   try {
-    upstream = await fetch(upstreamUrl, {
+    upstreamResp = await fetch(upstreamUrl, {
       method: request.method,
       headers: forwardHeaders,
       body: hasBody && body ? body : undefined,
       // @ts-ignore
       duplex: 'half',
-      signal: AbortSignal.timeout(config.upstream.timeout),
+      signal: AbortSignal.timeout(upstream.timeout),
     });
   } catch (err: unknown) {
     return Response.json(
@@ -154,15 +172,15 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
 
   const respHeaders = new Headers(corsHeaders());
   for (const h of FORWARDED_RESP_HEADERS) {
-    const v = upstream.headers.get(h);
+    const v = upstreamResp.headers.get(h);
     if (v) respHeaders.set(h, v);
   }
 
-  const contentType = upstream.headers.get('content-type') ?? '';
+  const contentType = upstreamResp.headers.get('content-type') ?? '';
   const isSSE = contentType.includes('text/event-stream');
-  const statusCode = upstream.status;
+  const statusCode = upstreamResp.status;
 
-  if (upstream.body && userId && apiKeyId) {
+  if (upstreamResp.body && userId && apiKeyId) {
     const _userId = userId;
     const _apiKeyId = apiKeyId;
     const _path = pathStr;
@@ -170,7 +188,7 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
     const _billingEnabled = config.billing.enabled;
     const _fallback = config.billing.deductionPerRequest;
 
-    const intercepted = buildInterceptedStream(upstream.body, isSSE, (usage) => {
+    const intercepted = buildInterceptedStream(upstreamResp.body, isSSE, (usage) => {
       const promptTokens = usage?.prompt_tokens ?? 0;
       const completionTokens = usage?.completion_tokens ?? 0;
       const cost = _billingEnabled
@@ -192,10 +210,10 @@ async function relay(request: NextRequest, paramsPromise: Promise<{ path: string
       });
     });
 
-    return new Response(intercepted, { status: statusCode, statusText: upstream.statusText, headers: respHeaders });
+    return new Response(intercepted, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
   }
 
-  return new Response(upstream.body, { status: statusCode, statusText: upstream.statusText, headers: respHeaders });
+  return new Response(upstreamResp.body, { status: statusCode, statusText: upstreamResp.statusText, headers: respHeaders });
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
